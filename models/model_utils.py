@@ -70,141 +70,199 @@ class Sequential(nn.Sequential):
                 raise KeyError('missing keys in state_dict: "{}"'.format(missing))                
 
 class ConvBlock(Module):
-    def __init__(self, dim_in, dim_out, gnorm=True, lrelu=True, **kwargs):
+    def __init__(self, dim_in, dim_out, norm='', act='', transpose=False, sn=False, **kwargs):
         super(ConvBlock, self).__init__()
 
         layers = []
-        layers.append(nn.Conv2d(dim_in, dim_out, **kwargs))
-        if gnorm:
-            layers.append(nn.GroupNorm(32, dim_out))
-        if lrelu:
-            layers.append(nn.LeakyReLU(0.01, inplace=True))
+
+        if not transpose:
+            conv = nn.Conv2d(dim_in, dim_out, **kwargs)
+        else:
+            conv = nn.ConvTranspose2d(dim_in, dim_out, **kwargs)
+        if sn:
+            conv = SpectralNorm(conv)
+        layers.append(conv)
+
+        # initialize normalization
+        norm_dim = dim_out
+        if norm == 'bn':
+            layers.append(nn.BatchNorm2d(norm_dim))
+        elif norm == 'in':
+            layers.append(nn.InstanceNorm2d(norm_dim))
+        elif norm == 'ln':
+            layers.append(LayerNorm(norm_dim))
+
+        # initialize act
+        if act == 'relu':
+            layers.append(nn.ReLU(inplace=True))
+        elif act == 'lrelu':
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+        elif act == 'prelu':
+            layers.append(nn.PReLU())
+        elif act == 'selu':
+            layers.append(nn.SELU(inplace=True))
+        elif act == 'tanh':
+            layers.append(nn.Tanh())
 
         self.main = Sequential(*layers)
 
     def forward(self, x):
         return self.main(x)
     
-class DenseBlock(Module):
-    def __init__(self, dim_in, dim_out, downsample=False, out=False):
-        super(DenseBlock, self).__init__()
         
-        gnorm, lrelu = (not out, not out)
+class ResBlock(Module):
+    def __init__(self, dim, norm='in', act='relu', dilation=1):
+        super(ResBlock, self).__init__()
 
-        if downsample:
-            self.conv = ConvBlock(dim_in, dim_out-dim_in, gnorm=gnorm, lrelu=lrelu, kernel_size=4, stride=2, padding=1, bias=False)
-            self.downsample = nn.AvgPool2d(kernel_size=2, stride=2)
-        else:
-            self.conv = ConvBlock(dim_in, dim_out-dim_in, gnorm=gnorm, lrelu=lrelu, kernel_size=3, stride=1, padding=1, bias=False)
-            self.downsample = lambda x: x
+        model = []
+        model += [ConvBlock(dim ,dim, norm=norm, act=act, kernel_size=3, stride=1, padding=dilation, dilation=dilation)]
+        model += [ConvBlock(dim ,dim, norm=norm, act='none', kernel_size=3, stride=1, padding=dilation, dilation=dilation)]
+        self.model = nn.Sequential(*model)
+
+    def forward(self, x):
+        residual = x
+        out = self.model(x)
+        out += residual
+        return out  
+
+class Self_Attn(Module):
+    """ Self attention Layer"""
+    def __init__(self,in_dim,activation='none'):
+        super(Self_Attn,self).__init__()
+        self.chanel_in = in_dim
+        self.activation = activation
         
-    def forward(self, x):
-        h = self.conv(x)
-        x = self.downsample(x)
-        return torch.cat([x,h], dim=1)
+        self.query_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
+        self.key_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
+        self.value_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim , kernel_size= 1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+        self.softmax  = nn.Softmax(dim=-1) #
+    def forward(self,x):
+        """
+            inputs :
+                x : input feature maps( B X C X W X H)
+            returns :
+                out : self attention value + input feature 
+                attention: B X N X N (N is Width*Height)
+        """
+        m_batchsize,C,width ,height = x.size()
+        proj_query  = self.query_conv(x).view(m_batchsize,-1,width*height).permute(0,2,1) # B X CX(N)
+        proj_key =  self.key_conv(x).view(m_batchsize,-1,width*height) # B X C x (*W*H)
+        energy =  torch.bmm(proj_query,proj_key) # transpose check
+        attention = self.softmax(energy) # BX (N) X (N) 
+        proj_value = self.value_conv(x).view(m_batchsize,-1,width*height) # B X C X N
+
+        out = torch.bmm(proj_value,attention.permute(0,2,1) )
+        out = out.view(m_batchsize,C,width,height)
         
-class ResidualBlock_cus(Module):
-    """Residual Block."""
-    def __init__(self, dim_in, dim_out, **kwargs):
-        super(ResidualBlock, self).__init__()
-        self.main = Sequential(
-            nn.Conv2d(dim_in, dim_out, **kwargs),
-            nn.GroupNorm(32, dim_out),
-            nn.LeakyReLU(0.01,inplace=True),
-            nn.Conv2d(dim_out, dim_out, **kwargs),
-            nn.GroupNorm(32, dim_out))
+        out = self.gamma*out + x
+        return out
 
-    def forward(self, x):
-        return x + self.main(x)    
-    
-class ResidualBlock(Module):
-    """Residual Block."""
-    def __init__(self, dim_in, dim_out, **kwargs):
-        super(ResidualBlock, self).__init__()
-        self.main = Sequential(
-            nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=False, **kwargs),
-            nn.GroupNorm(32, dim_out),
-            nn.LeakyReLU(0.01,inplace=True),
-            nn.Conv2d(dim_out, dim_out, kernel_size=3, stride=1, padding=1, bias=False, **kwargs),
-            nn.GroupNorm(32, dim_out))
-
-    def forward(self, x):
-        return x + self.main(x)
-    
-class model_asmb:
-    def __init__(self):
-        self.skt_net = None
-        self.pho_net = None
-        self.map = {'pho':self.pho_net, 'skt':self.skt_net}
-    
-    def __call__(self, z, mode):
-        assert mode in self.map.keys()
-        return self.map[mode](z)
-
-    def parameters(self):
-        return [*self.pho_net.parameters(), *self.skt_net.parameters()]
-
-    def save_model(self, path):
-        path, tp = path.split('.')
-        path_skt = path + '_skt.' + tp
-        path_pho = path + '_pho.' + tp
-        torch.save(self.skt_net.state_dict(), path_skt)
-        torch.save(self.pho_net.state_dict(), path_pho)
-
-    def load_model(self, path):
-        path, tp = path.split('.')
-        path_skt = path + '_skt.' + tp
-        path_pho = path + '_pho.' + tp
-        self.skt_net.load_state_dict(torch.load(path_skt), strict=False)
-        self.pho_net.load_state_dict(torch.load(path_pho), strict=False)
-
-    def to(self, device):
-        self.pho_net = self.pho_net.to(device)
-        self.skt_net = self.skt_net.to(device)
+def l2normalize(v, eps=1e-12):
+    return v / (v.norm() + eps)
 
 
-class AttentionLayer(Module):
-    def __init__(self, conv_dim, mod_dim=0):
-        super(AttentionLayer, self).__init__()
+class SpectralNorm(Module):
+    def __init__(self, module, name='weight', power_iterations=1):
+        super(SpectralNorm, self).__init__()
+        self.module = module
+        self.name = name
+        self.power_iterations = power_iterations
+        if not self._made_params():
+            self._make_params()
 
-        if mod_dim > 0:
-            self.mod_dim = mod_dim
-        else:
-            self.mod_dim = conv_dim
+    def _update_u_v(self):
+        u = getattr(self.module, self.name + "_u")
+        v = getattr(self.module, self.name + "_v")
+        w = getattr(self.module, self.name + "_bar")
 
-        self.conv1 = nn.Conv2d(conv_dim, conv_dim//8, kernel_size=1, stride=1, padding=0)
-        self.conv2 = nn.Conv2d(conv_dim, conv_dim//8, kernel_size=1, stride=1, padding=0)
-        self.conv3 = nn.Conv2d(conv_dim, mod_dim, kernel_size=1, stride=1, padding=0)
+        height = w.data.shape[0]
+        for _ in range(self.power_iterations):
+            v.data = l2normalize(torch.mv(torch.t(w.view(height,-1).data), u.data))
+            u.data = l2normalize(torch.mv(w.view(height,-1).data, v.data))
 
-        self.alpha = Parameter(torch.FloatTensor([0.0]))
-        self.beta = Parameter(torch.FloatTensor([1.0]))
+        # sigma = torch.dot(u.data, torch.mv(w.view(height,-1).data, v.data))
+        sigma = u.dot(w.view(height, -1).mv(v))
+        setattr(self.module, self.name, w / sigma.expand_as(w))
 
-    def to(self, device):
-        self.conv1.to(device)
-        self.conv2.to(device)
-        self.conv3.to(device)
-        self.alpha = self.alpha.to(device)
-        self.alpha.requires_grad_(True)
-        self.beta = self.beta.to(device)
-        self.beta.requires_grad_(True)
+    def _made_params(self):
+        try:
+            u = getattr(self.module, self.name + "_u")
+            v = getattr(self.module, self.name + "_v")
+            w = getattr(self.module, self.name + "_bar")
+            return True
+        except AttributeError:
+            return False
 
-    def forward(self, x):
-        chn = x.size(1)
-        f, g = self.conv1(x), self.conv2(x)
-        f = f.view(f.size(0), f.size(1), -1)
-        g = g.view(g.size(0), g.size(1), -1)
 
-        w = torch.matmul(torch.transpose(f,1,2),g)
+    def _make_params(self):
+        w = getattr(self.module, self.name)
 
-        # normalize
-        w = F.softmax(w, dim=1)
+        height = w.data.shape[0]
+        width = w.view(height, -1).data.shape[1]
 
-        # activation
-        h = self.conv3(x)
-        h = h.view(x.size(0), self.mod_dim, -1)
-        x_mod, x_reserve = x[:,:self.mod_dim,:,:], x[:,self.mod_dim:,:,:]
-        h = torch.matmul(h, w).view(x_mod.shape)
+        u = Parameter(w.data.new(height).normal_(0, 1), requires_grad=False)
+        v = Parameter(w.data.new(width).normal_(0, 1), requires_grad=False)
+        u.data = l2normalize(u.data)
+        v.data = l2normalize(v.data)
+        w_bar = Parameter(w.data)
 
-        out_mod = self.alpha * h + self.beta * x_mod
+        del self.module._parameters[self.name]
 
-        return torch.cat([out_mod, x_reserve], dim=1)        
+        self.module.register_parameter(self.name + "_u", u)
+        self.module.register_parameter(self.name + "_v", v)
+        self.module.register_parameter(self.name + "_bar", w_bar)
+
+
+    def forward(self, *args):
+        self._update_u_v()
+        return self.module.forward(*args)      
+
+class STN(Module):
+    def __init__(self, in_dim):
+        super(STN, self).__init__()
+
+        self.conv = Sequential(
+            ConvBlock(in_dim, in_dim, norm='in', act='relu', kernel_size=3, stride=1, padding=2, dilation=1),
+            ConvBlock(in_dim, in_dim//2, norm='in', act='relu', kernel_size=4, stride=2, padding=1),
+            ConvBlock(in_dim//2, in_dim//4, norm='in', act='relu', kernel_size=4, stride=2, padding=1),
+            Self_Attn(in_dim//4), nn.ReLU(True),
+            ConvBlock(in_dim//4, in_dim//4, norm='in', act='relu', kernel_size=4, stride=2, padding=1),
+            Self_Attn(in_dim//4), nn.ReLU(True),
+            nn.Conv2d(in_dim//4, 6, kernel_size=3, stride=1, padding=1)
+            )
+
+        self.conv[-1].bias.data = torch.FloatTensor([1,0,0,0,1,0])
+        self.conv[-1].weight.data.zero_()
+
+    def forward(self, feat):
+        theta = self.conv(feat)
+        h,w = theta.size(2), theta.size(3)
+        theta = F.avg_pool2d(theta, (h,w)).view(-1, 2, 3)
+
+        feat = STN.affine_map(feat, theta)
+        return feat, STN.inverse_theta(theta)
+
+    @staticmethod
+    def affine_map(feat, theta):
+        grid = F.affine_grid(theta, feat.size())
+        x = F.grid_sample(feat, grid)  
+        return x
+
+    @staticmethod
+    def inverse_theta(theta):
+        inv_theta = []
+        for i in range(len(theta)):
+            inv_theta.append(torch.cat([torch.inverse(theta[i][:,:2]),-theta[i][:,2:3]], dim=1))
+
+        return torch.stack(inv_theta)
+
+
+
+
+
+
+
+
+
