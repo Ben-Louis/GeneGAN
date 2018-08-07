@@ -37,6 +37,9 @@ def save_model(model, config, log):
     for key, net in model.items():
         torch.save(net.state_dict(), os.path.join(config.model_path, '%s-%d.cpkt'%(key, log['e'])))
 
+def load_model(model, config):
+    for key, net in model.items():
+        net.load_state_dict(torch.load(os.path.join(config.model_path, '%s-%d.cpkt'%(key, config.pretrained_model))))
 
 def makedir(path):
     if not os.path.exists(path):

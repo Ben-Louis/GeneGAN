@@ -34,9 +34,10 @@ def get_parameter():
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--beta', type=float, default=0.5)
     parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--pretrained_model', type=int, default=-1)
 
-    parser.add_argument('--lambda_rec', type=float, default=10)
-    parser.add_argument('--lambda_zero', type=float, default=1)
+    parser.add_argument('--lambda_rec', type=float, default=5)
+    parser.add_argument('--lambda_zero', type=float, default=10)
     parser.add_argument('--lambda_paral', type=float, default=1)
 
     # log

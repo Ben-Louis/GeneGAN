@@ -6,9 +6,11 @@ from utils import *
 
 def train(model, data, config):
 
-    # model to device
+    # load model / model to device
     for net in model.values():
         net.to(config.device)
+    if config.pretrained_model > 0:
+        load_model(model, config)
 
     # optimizor
     opts = {}
@@ -115,7 +117,7 @@ def train(model, data, config):
             ### save images ###
             if (i+1) % (config.sample_step) == 0:
                 n = config.num_sample
-                pos_imgs, neg_imgs = data.get_test((i+1)%100)
+                pos_imgs, neg_imgs = data.get_test((n*(i+1)//config.sample_step)%(100-n))
                 pos_imgs, neg_imgs = pos_imgs.to(config.device), neg_imgs.to(config.device)
 
                 imgs = [torch.cat([torch.ones_like(neg_imgs[0:2]).cpu(),neg_imgs.cpu()])]
