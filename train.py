@@ -38,6 +38,8 @@ def train(model, data, config):
             # get fake images
             feats = model['E'](torch.cat([imgs_pos, imgs_neg]))
             feats[0] = shuffle(feats[0])
+            # force
+            feats[1][batch_size:] = 0
             fake_imgs = model['G'](feats)
             fake_imgs_pos, fake_imgs_neg = fake_imgs.split(batch_size)
 
@@ -69,7 +71,7 @@ def train(model, data, config):
                 # generate
                 half_batch = batch_size // 2
                 feats1 = feats[1].split(half_batch)
-                feats[1] = torch.cat([feats1[0], shuffle(feats1[2], inv=True), shuffle(feats1[1], inv=True), feats1[3]])
+                feats[1] = torch.cat([feats1[0], torch.zeros_like(feats1[2]), shuffle(feats1[1], inv=True), torch.zeros_like(feats1[3])])
                 #feats[1][half_batch:half_batch+batch_size] = shuffle(feats[1][half_batch:half_batch+batch_size], inv=True)
                 fake_imgs = model['G'](feats).split(half_batch)
 
